@@ -17,6 +17,8 @@ COPY . /app/
 # Install Python dependencies
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
+RUN playwright install --with-deps
+RUN crawl4ai-setup
 
 # Expose port 8000 for the Django app
 EXPOSE 8000

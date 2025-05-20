@@ -5,3 +5,5 @@ db.sqlite3
 __pycache__/
 .env
 archive/
+page_images/
+crawled_docs/
