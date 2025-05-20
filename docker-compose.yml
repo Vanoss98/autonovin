@@ -18,6 +18,8 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - SECRET_KEY=${SECRET_KEY}
+      - CELERY_BROKER_URL = ${CELERY_BROKER}
+      - CELERY_RESULT_BACKEND = ${CELERY_BACKEND}
 
   db:
     image: postgres:13
@@ -36,6 +38,14 @@ services:
     container_name: autonovin_redis
     ports:
       - "6379:6379"
+
+  chroma:
+    image: ghcr.io/chroma-core/chroma:latest
+    volumes:
+        - index_data:/chroma/.chroma/index
+    container_name: autonovin_chroma
+    ports:
+      - "8002:8000"
 
   celery:
     build: .
