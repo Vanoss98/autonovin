@@ -3,5 +3,5 @@ from .views import CrawlExecutionView
 
 
 urlpatterns = [
-    path('execute/', CrawlExecutionView.as_view(), name='crawl-execution')
+    path("execute/", CrawlExecutionView.as_view(), name="crawl-execution"),
 ]
