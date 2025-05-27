@@ -40,9 +40,7 @@ services:
       - "6379:6379"
 
   chroma:
-    image: ghcr.io/chroma-core/chroma:latest
-    volumes:
-        - index_data:/chroma/.chroma/index
+    image: chromadb/chroma
     container_name: autonovin_chroma
     ports:
       - "8002:8000"
