@@ -20,6 +20,9 @@ class PageImage(models.Model):
     url = models.URLField(unique=False)
     file = models.FileField(upload_to="page_images/")     # stores to MEDIA_ROOT/page_images
     downloaded_at = models.DateTimeField(auto_now_add=True)
+    uploaded = models.BooleanField(default=False)
+    upload_response = models.JSONField(blank=True, null=True)
+    upload_error = models.TextField(blank=True, null=True)
 
     class Meta:
         indexes = [models.Index(fields=["page", "url"])]
