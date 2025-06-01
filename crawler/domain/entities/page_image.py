@@ -10,5 +10,6 @@ class PageImageEntity:
     page: int
     url: str
     file: Optional[Union[str, ContentFile]] = None
+    local_path: Optional[str] = None
     downloaded_at: Optional[datetime] = None
 

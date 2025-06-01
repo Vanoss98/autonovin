@@ -34,3 +34,12 @@ class PageImageRepositoryInterface(ABC):
     async def aexists(self, **lookup) -> bool:
         """ asynchronously checks if a page image exists by given parameters """
         pass
+
+    def list_by_page_id(self, page_id: int) -> List[PageImageEntity]:
+        """
+        Return all PageImageEntity objects where page_id matches.
+        """
+        pass
+
+    async def list_by_page_id_async(self, page_id: int) -> List[PageImageEntity]:
+        pass
