@@ -15,6 +15,18 @@ class PageRepositoryInterface(ABC):
         pass
 
     @abstractmethod
+    def update(self, page_entity: PageEntity) -> PageEntity:
+        """
+        Update an existing PageModel in the database using fields from the PageEntity.
+        Returns a fresh PageEntity based on the saved model.
+        """
+        pass
+
+    @abstractmethod
+    async def update_async(self, page_entity: PageEntity) -> PageEntity:
+        pass
+
+    @abstractmethod
     def filter(self, **data) -> List[PageEntity]:
         """ returns a filtered queryset of page objects """
         pass

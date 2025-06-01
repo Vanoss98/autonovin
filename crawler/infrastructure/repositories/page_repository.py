@@ -58,6 +58,30 @@ class PageRepository(PageRepositoryInterface):
         """
         return await sync_to_async(self.create, thread_sensitive=True)(page)
 
+    def update(self, page_entity: PageEntity) -> PageEntity:
+        """
+        Update an existing PageModel in the database using fields from the PageEntity.
+        Returns a fresh PageEntity based on the saved model.
+        """
+        try:
+            model_instance = PageModel.objects.get(id=page_entity.id)
+        except PageModel.DoesNotExist:
+            raise ValueError(f"Page with ID {page_entity.id} not found.")
+
+        # Update any fields you want—e.g. title, source, url, etc.
+        model_instance.title = page_entity.title
+        model_instance.source = page_entity.source
+        model_instance.url = page_entity.url
+        model_instance.entity_id = page_entity.entity_id
+        model_instance.markdown_file = page_entity.markdown_file
+        model_instance.save()
+
+        # Return a new PageEntity from the saved model
+        return self._to_entity(model_instance)
+
+    async def update_async(self, page_entity: PageEntity) -> PageEntity:
+        return await sync_to_async(self.update, thread_sensitive=True)(page_entity)
+
     def filter(self, **data) -> List[PageEntity]:
         return [self._to_entity(m) for m in PageModel.objects.filter(**data)]
 
