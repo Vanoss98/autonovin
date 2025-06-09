@@ -1,9 +1,13 @@
 from celery import shared_task, chain
 from asgiref.sync import async_to_sync
+from autonovin.common.infrastructure.request_client import RequestsHttpClient
+from ingestion.application.services.chroma_service import ChromaEmbeddingClient
 from ingestion.application.services.chunker_service import ChunkerService
 from ingestion.application.services.openai_service import OpenaiService
 from ingestion.application.usecases.chunker_usecase import PageChunkingUseCase
+from ingestion.application.usecases.embedder_usecase import EmbedChunksUseCase
 from ingestion.application.usecases.metadata_usecase import MetadataUseCase
+from .application.services.api_service import ApiService
 from .application.services.crawl4ai_crawler_service import Crawl4aiCrawlerService
 from .application.services.entity_id_matcher_service import EntityIdMatcherService
 from .application.services.image_download_service import ImageDownloadService
@@ -20,8 +24,21 @@ crawler_service = Crawl4aiCrawlerService()
 image_downloader = ImageDownloadService()
 entity_id_matcher_service = EntityIdMatcherService(file_path="cars.xlsx", threshold=0.9, repository=page_repo)
 chunk_usecase = PageChunkingUseCase(chunker_service=ChunkerService(), repository=page_repo)
-metadata_usecase = MetadataUseCase(llm_service=OpenaiService(), repository=page_repo)
-# Wrap the PageCrawlerUseCase into a Celery task
+metadata_usecase = MetadataUseCase(llm_service=OpenaiService(), repository=page_repo, dataframe_path="car_specs.xlsx",
+                                   api_service=ApiService(http_client=RequestsHttpClient(),
+                                                          base_url="https://isorder.iranfab.com"),
+                                   id_matcher_service=entity_id_matcher_service)
+
+
+chroma_client = ChromaEmbeddingClient(
+    chroma_host="chroma",
+    chroma_port=8000,
+    collection_name="chroma-khodro",
+    embedding_model="text-embedding-3-large",
+    embedding_dimensions=1024
+)
+embed_usecase = EmbedChunksUseCase(embedding_client=chroma_client)
+
 
 
 # Configure once at import time:
@@ -67,16 +84,20 @@ def page_crawler_task(self, config):
         content = chunk_usecase.chunker_service.get_markdown_content(page)
         chunks = async_to_sync(chunk_usecase.execute)(page_id)
         metadata = async_to_sync(metadata_usecase.execute)(page_id, content)
-        async_to_sync(entity_id_matcher_service.find_best_match)(page_id)
-        images = async_to_sync(image_repo.list_by_page_id_async)(page_id)
-        for img in images:
-            upload_image_task.delay(img.id)
+        # images = async_to_sync(image_repo.list_by_page_id_async)(page_id)
+        # for img in images:
+        #     upload_image_task.delay(img.id)
+        try:
+            chunk_ids = embed_usecase.execute(chunks, metadata)
+        except Exception as e:
+            # If embedding fails, you can choose to log or raise:
+            raise RuntimeError(f"Failed embedding chunks for page {page_id}: {e}") from e
 
         overall.append({
             "page_id": page_id,
             "chunks": chunks,
             "metadata": metadata,
-            "images_enqueued_for_upload": [img.id for img in images],
+            # "images_enqueued_for_upload": [img.id for img in images],
         })
 
     return {"results": overall}

@@ -24,6 +24,6 @@ class PageImage(models.Model):
     upload_response = models.JSONField(blank=True, null=True)
     upload_error = models.TextField(blank=True, null=True)
 
-    class Meta:
-        indexes = [models.Index(fields=["page", "url"])]
-        unique_together = [("page", "url")]
+    # class Meta:
+    #     indexes = [models.Index(fields=["page", "url"])]
+    #     unique_together = [("page", "url")]
