@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'crawler',
     'ingestion',
     'rest_framework',
+    'ocr',
 ]
 
 MIDDLEWARE = [
@@ -132,7 +133,10 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
-STATIC_URL = "static/"
+STATIC_URL = '/static/'
+STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
+MODEL_DIR = BASE_DIR / "models"
+YOLO_WEIGHTS_PATH = MODEL_DIR / "LP-detection.pt"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
