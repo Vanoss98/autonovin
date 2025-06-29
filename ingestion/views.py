@@ -11,7 +11,8 @@ from .service import index_pages, chroma_client
 from rest_framework.views import APIView
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
-
+import os
+from django.conf import settings
 
 class Retrieve(APIView):
     def post(self, request):
@@ -20,9 +21,9 @@ class Retrieve(APIView):
         embeddings = OpenAIEmbeddings(model="text-embedding-3-large", dimensions=1024)
         store = Chroma(
             client=chroma_client,
-            collection_name="chroma-khodro",
+            collection_name="car_spec",
             embedding_function=embeddings,
-            # add persist_directory="…" if you saved the DB somewhere custom
+            # persist_directory=os.path.join(settings.BASE_DIR, "vectors"),
         )
         docs = store.similarity_search(query, k=4)
         results = [

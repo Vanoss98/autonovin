@@ -33,7 +33,7 @@ metadata_usecase = MetadataUseCase(llm_service=OpenaiService(), repository=page_
 chroma_client = ChromaEmbeddingClient(
     chroma_host="chroma",
     chroma_port=8000,
-    collection_name="chroma-khodro",
+    collection_name="car_spec",
     embedding_model="text-embedding-3-large",
     embedding_dimensions=1024
 )
@@ -67,9 +67,24 @@ def upload_image_task(self, page_image_id: int):
 
     return image_upload_usecase.execute(page_image_entity)
 
+def make_embed_usecase() -> EmbedChunksUseCase:
+    """
+    Build a fresh ChromaEmbeddingClient (+ EmbedChunksUseCase) every call.
+    Called inside each task run so the Chroma collection UUID is always valid.
+    """
+    chroma_client = ChromaEmbeddingClient(
+        chroma_host="chroma",            # service name from docker-compose
+        chroma_port=8000,
+        collection_name="car_spec",
+        embedding_model="text-embedding-3-large",
+        # embedding_dimensions=1024,     # let Chroma infer → fewer mismatch bugs
+    )
+    return EmbedChunksUseCase(embedding_client=chroma_client)
+
 
 @shared_task(bind=True)
 def page_crawler_task(self, config):
+    embed_usecase = make_embed_usecase()
     page_crawler_use_case = PageCrawlerUseCase(
         crawler=crawler_service,
         repository=page_repo,

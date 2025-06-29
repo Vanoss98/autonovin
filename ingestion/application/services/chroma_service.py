@@ -16,7 +16,7 @@ class ChromaEmbeddingClient(EmbeddingClient):
         self,
         chroma_host: str = "chroma",
         chroma_port: int = 8000,
-        collection_name: str = "chroma-khodro",
+        collection_name: str = "car_spec",
         embedding_model: str = "text-embedding-3-large",
         embedding_dimensions: int = 1024
     ):

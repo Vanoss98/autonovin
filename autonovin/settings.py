@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     'crawler',
+    'chatbot',
     'ingestion',
     'rest_framework',
     'ocr',
