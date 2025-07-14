@@ -34,6 +34,7 @@ INSTALLED_APPS = [
     'ingestion',
     'rest_framework',
     'ocr',
+    'compliance'
 ]
 
 MIDDLEWARE = [
@@ -144,7 +145,7 @@ YOLO_WEIGHTS_PATH = MODEL_DIR / "LP-detection.pt"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER")
-CELERY_RESULT_BACKEND = os.environ.get("CELERY_BACKEND")
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
