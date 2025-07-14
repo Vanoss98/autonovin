@@ -1,7 +1,11 @@
+version: "3.9"
+
 services:
+# ─────────────────────────── Django API ────────────────────────────────
   web:
     build: .
-    container_name: autonovin_django_app
+    image: autonovin_app:latest
+    container_name: autonovin_web
     command: python manage.py runserver 0.0.0.0:8000
     volumes:
       - .:/app
@@ -18,41 +22,20 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - SECRET_KEY=${SECRET_KEY}
-      - CELERY_BROKER_URL=${CELERY_BROKER}
-      - CELERY_RESULT_BACKEND=${CELERY_BACKEND}
 
-  db:
-    image: postgres:13
-    container_name: autonovin_postgres_db
-    environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+      # ── external RabbitMQ broker ──
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
 
-  redis:
-    image: redis:alpine
-    container_name: autonovin_redis
-    ports:
-      - "6379:6379"
-
-  chroma:
-    image: chromadb/chroma
-    container_name: autonovin_chroma
-    ports:
-      - "8002:8000"
-
+# ─────────────────────────── Celery worker ─────────────────────────────
   celery:
-    build: .
-    container_name: autonovin_celery_worker
-    command: celery --app=autonovin worker -l INFO
+    image: autonovin_app:latest
+    container_name: autonovin_celery
+    command: celery -A autonovin worker -l INFO
     volumes:
       - .:/app
     depends_on:
-      - web
+      - db
       - redis
     environment:
       - DEBUG=${DEBUG}
@@ -63,5 +46,37 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - SECRET_KEY=${SECRET_KEY}
 
+      # same external broker / backend
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+
+# ─────────────────────────── Postgres ──────────────────────────────────
+  db:
+    image: postgres:13
+    container_name: autonovin_postgres_db
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+# ─────────────────────────── Redis (cache & result backend) ────────────
+  redis:
+    image: redis:alpine
+    container_name: autonovin_redis
+    ports:
+      - "6379:6379"
+
+# ─────────────────────────── ChromaDB ──────────────────────────────────
+  chroma:
+    image: chromadb/chroma
+    container_name: autonovin_chroma
+    ports:
+      - "8002:8000"
+
+# ─────────────────────────── volumes ───────────────────────────────────
 volumes:
   postgres_data:

@@ -6,4 +6,5 @@ urlpatterns = [
     path("crawl/", include('crawler.urls')),
     path("chatbot/", include('chatbot.urls')),
     path("ocr/", include('ocr.urls')),
+    path("compliance/", include('compliance.urls')),
 ]
