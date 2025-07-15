@@ -3,5 +3,5 @@ from .views import *
 
 urlpatterns = [
     path("related-ads/", RetrieveAdsByBrandModelView.as_view(), name="related-ads"),
-    path("queue-peek/", queue_peek, name="queue-peek"),
+    # path("queue-peek/", queue_peek, name="queue-peek"),
 ]
