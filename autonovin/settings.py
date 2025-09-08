@@ -34,20 +34,25 @@ INSTALLED_APPS = [
     'ingestion',
     'rest_framework',
     'ocr',
-    'compliance'
+    'compliance',
+    'corsheaders'
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
+    # "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "corsheaders.middleware.CorsMiddleware"
 ]
 
 ROOT_URLCONF = "autonovin.urls"
+
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = False
 
 TEMPLATES = [
     {
@@ -67,7 +72,6 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "autonovin.wsgi.application"
 
-
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
@@ -81,7 +85,6 @@ DATABASES = {
         'PORT': os.getenv('DB_PORT'),
     }
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
@@ -113,7 +116,7 @@ CACHES = {
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.AllowAny",   # or whatever you need
+        "rest_framework.permissions.AllowAny",  # or whatever you need
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
@@ -130,7 +133,6 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 
 USE_TZ = True
-
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
@@ -149,3 +151,12 @@ CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+RABBIT_HOST = os.environ.get("RABBIT_HOST")
+RABBIT_PORT = os.environ.get("RABBIT_PORT")
+RABBIT_USER = os.environ.get("RABBIT_USER")
+RABBIT_PASS = os.environ.get("RABBIT_PASS")
+
+COMPLIANCE_QUEUE_SELL = os.environ.get("COMPLIANCE_QUEUE_SELL")
+COMPLIANCE_QUEUE_BUY = os.environ.get("COMPLIANCE_QUEUE_BUY")
+
