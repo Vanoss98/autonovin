@@ -36,8 +36,8 @@ def analyze_query(user_query: str) -> Dict[str, Dict[str, List[str]]]:
     }
     """
     llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0,
+        model="gpt-4.1",
+        temperature=0.5,
         timeout=45,
         max_retries=3,
         api_key=settings.OPENAI_API_KEY,
@@ -65,6 +65,23 @@ def _keyword_overlap(text: str, kws: List[str]) -> int:
     tl = text.lower()
     return sum(1 for kw in kws if kw.lower() in tl)
 
+def _norm(s: str) -> set[str]:
+    if not s:
+        return {""}
+    s = s.strip().lower()
+    s = s.replace("ي","ی").replace("ك","ک")  # arabic->persian
+    s = re.sub(r"[\u0640\u200c\u200f\u2060]", "", s)  # tatweel/ZW
+    s = re.sub(r"\s+", " ", s)
+    # unify digits both ways
+    en2fa = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+    fa2en = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+    return { s.translate(fa2en), s.translate(en2fa) }  # return both variants
+
+def _soft_contains(hay: str, aliases_norm: set[str]) -> bool:
+    # normalize hay to one variant for substring check
+    h = next(iter(_norm(hay)))
+    return any(a in h for a in aliases_norm)
+
 def hybrid_search(
     analysis: Dict[str, Dict[str, List[str]]],
     *,
@@ -73,32 +90,45 @@ def hybrid_search(
     beta: float = 0.40,
     gamma: float = 0.15,
 ) -> Dict[str, List[Tuple]]:
-    """
-    :param analysis: output of analyze_query()
-    :returns: {
-      "BMW X5": [
-         (chunk_id, title, content, score, imgs, model_id, url, "car_spec"), …
-      ],
-      …
-    }
-    """
     results: Dict[str, List[Tuple]] = {}
 
     for model, info in analysis.items():
-        aliases = info["aliases"]
-        kws     = info["keywords"]
-        if not kws:
+        # 0) make sure the model key itself is used as an alias
+        raw_aliases = list(dict.fromkeys((info.get("aliases") or []) + [model]))
+        kws = info.get("keywords", [])  # allow empty
+
+        # normalize all aliases (keep both en/fa-digit forms)
+        aliases_norm = set()
+        for a in raw_aliases:
+            aliases_norm |= _norm(a)
+        if not aliases_norm:
+            results[model] = []
             continue
 
-        # 1) embed only aliases + keywords
-        to_embed = " ".join(aliases + kws)
+        # embed aliases+kws even if kws is empty
+        to_embed = " ".join(list(aliases_norm) + kws)
         vec = EMBED.embed_query(to_embed)
 
-        # 2) ANN search *filtered* by metadata.car_model ∈ aliases
-        filter = {"car_model": {"$in": aliases}}
+        # 1) strict metadata filter (equality)
+        where_meta = {"car_model": {"$in": list(aliases_norm)}}
         doc_scores = vectordb.similarity_search_by_vector_with_relevance_scores(
-            vec, k=top_k * 3, filter=filter
+            vec, k=top_k * 3, filter=where_meta
         )
+
+        # 2) fallback: filter by document text substring (longest alias first)
+        if not doc_scores:
+            for a in sorted(aliases_norm, key=len, reverse=True):
+                doc_scores = vectordb.similarity_search_by_vector_with_relevance_scores(
+                    vec, k=top_k * 6, where_document={"$contains": a}
+                )
+                if doc_scores:
+                    break
+
+        # 3) last fallback: unfiltered ANN
+        if not doc_scores:
+            doc_scores = vectordb.similarity_search_by_vector_with_relevance_scores(
+                vec, k=top_k * 6
+            )
         if not doc_scores:
             results[model] = []
             continue
@@ -107,30 +137,41 @@ def hybrid_search(
         corpus = [d.page_content for d in docs]
         metas  = [d.metadata     for d in docs]
         ids    = [d.id           for d in docs]
+        titles = [m.get("title","") for m in metas]
+        carms  = [m.get("car_model","") for m in metas]
 
-        # 3) BM25 on the mini-corpus using only keywords
-        bm25   = BM25Okapi([c.split() for c in corpus])
-        bm_scores = bm25.get_scores(kws)
+        # BM25 over corpus; if no kws, use alias tokens instead
+        query_tokens = kws if kws else list(aliases_norm)
+        bm25 = BM25Okapi([c.split() for c in corpus])
+        bm_scores = bm25.get_scores(query_tokens)
 
-        # 4) keyword-overlap bonus
-        bonus = [_keyword_overlap(c, kws) * gamma for c in corpus]
+        def _overlap(text: str, toks: List[str]) -> int:
+            tl = text.lower()
+            return sum(1 for t in toks if t.lower() in tl)
 
-        # 5) fuse & pack
-        packed = []
+        bonuses = []
+        for i in range(len(ids)):
+            kw_bonus = _overlap(corpus[i], query_tokens) * gamma
+            soft = 1.0 if (_soft_contains(carms[i], aliases_norm) or _soft_contains(titles[i], aliases_norm)) else 0.0
+            bonuses.append(kw_bonus + soft)
+
+        packed: List[Tuple] = []
         for i, cid in enumerate(ids):
-            fused = alpha * bm_scores[i] + beta * vec_scores[i] + bonus[i]
+            fused = alpha * bm_scores[i] + beta * vec_scores[i] + bonuses[i]
             m = metas[i]
-            imgs = [x.strip() for x in m.get("images","").split(",") if x.strip()]
+            imgs = [x.strip() for x in (m.get("images","") or "").split(",") if x.strip()]
+            page_id = m.get("page_id")  # <-- NEW: pick page_id from metadata
             packed.append(
                 (
-                    cid,
-                    m.get("title",""),
-                    corpus[i],
-                    fused,
-                    imgs,
-                    m.get("model_id",""),
-                    m.get("url",""),
-                    "car_spec",
+                    cid,                 # 0
+                    titles[i],           # 1
+                    corpus[i],           # 2
+                    fused,               # 3
+                    imgs,                # 4
+                    m.get("model_id",""),# 5
+                    m.get("url",""),     # 6
+                    "car_spec",          # 7 source_name
+                    page_id,             # 8 <-- NEW: page_id
                 )
             )
 
