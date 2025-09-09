@@ -7,6 +7,8 @@ from django.conf import settings
 from collections import defaultdict
 from crawler.infrastructure.models import PageImage
 import json
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ def _extract_page_ids_from_history(history: list[dict]) -> list[int]:
     return []
 
 
+@method_decorator(csrf_exempt, name="dispatch")
 class ChatAPIView(APIView):
     def post(self, request):
         user_text = request.data.get("message")
