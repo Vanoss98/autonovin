@@ -157,7 +157,8 @@ RABBIT_PASS = os.environ.get("RABBIT_PASS")
 COMPLIANCE_QUEUE_SELL = os.environ.get("COMPLIANCE_QUEUE_SELL")
 COMPLIANCE_QUEUE_BUY = os.environ.get("COMPLIANCE_QUEUE_BUY")
 
-CORS_ALLOWED_ORIGINS = ["*"]
+CORS_ALLOWED_ORIGINS = ["http://localhost:3000", "https://localhost:3000", "http://127.0.0.1:3000",
+                        "https://127.0.0.1:3000"]
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_PRIVATE_NETWORK = True
@@ -171,4 +172,5 @@ SESSION_COOKIE_SAMESITE = "None"
 CSRF_COOKIE_SAMESITE = "None"
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
-CSRF_TRUSTED_ORIGINS = ['*']
+CSRF_TRUSTED_ORIGINS = ["http://localhost:3000", "https://localhost:3000", "http://127.0.0.1:3000",
+                        "https://127.0.0.1:3000"]
