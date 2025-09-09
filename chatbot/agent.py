@@ -40,10 +40,22 @@ def _role_of(msg: BaseMessage) -> str:
 def serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for m in messages:
-        out.append({
-            "role": _role_of(m),
-            "content": _content_to_str(m.content),
-        })
+        role = _role_of(m)
+        content = _content_to_str(m.content)
+
+        if role == "assistant":
+            # drop empty assistant stubs (e.g., tool-call scaffolding)
+            if not (content or "").strip():
+                continue
+            # if assistant content is JSON with {"response": "...", ...}, keep only the response text
+            try:
+                payload = json.loads(content)
+                if isinstance(payload, dict) and "response" in payload:
+                    content = payload["response"]
+            except Exception:
+                pass  # leave as-is if not JSON
+
+        out.append({"role": role, "content": content})
     return out
 
 
