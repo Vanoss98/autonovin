@@ -155,3 +155,13 @@ def run_turn(user_text: str, *, thread_id: str | None = None) -> tuple[str, list
         answer = raw
 
     return answer, urls, thread_id, full_history
+
+
+def get_thread_messages(thread_id: str):
+    """Return raw LangGraph messages for a thread (or [] if none)."""
+    cfg = {"configurable": {"thread_id": thread_id}}
+    snapshot = _compiled_graph.get_state(cfg)  # StateSnapshot or None
+    if snapshot is None:
+        return []
+    # MessagesState uses "messages" key
+    return snapshot.values.get("messages", [])
