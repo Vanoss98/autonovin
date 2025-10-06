@@ -35,7 +35,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'ocr',
     'compliance',
-    'corsheaders'
+    # 'corsheaders'
 ]
 
 
@@ -44,7 +44,7 @@ ROOT_URLCONF = "autonovin.urls"
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "corsheaders.middleware.CorsMiddleware",  # <- Moved before CommonMiddleware
+    # "corsheaders.middleware.CorsMiddleware",  # <- Moved before CommonMiddleware
     "django.middleware.common.CommonMiddleware",
     # "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -53,37 +53,10 @@ MIDDLEWARE = [
 ]
 
 # CORS Configuration - More explicit settings
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_CREDENTIALS = False
+# CORS_ALLOW_ALL_ORIGINS = True
+# CORS_ALLOW_CREDENTIALS = False
 
-# Explicitly allow all methods
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS',
-    'PATCH',
-    'POST',
-    'PUT',
-]
 
-# Explicitly allow headers that might be sent
-CORS_ALLOW_HEADERS = [
-    'accept',
-    'accept-encoding',
-    'authorization',
-    'content-type',
-    'dnt',
-    'origin',
-    'user-agent',
-    'x-csrftoken',
-    'x-requested-with',
-]
-
-# Allow browsers to access these headers in responses
-CORS_EXPOSE_HEADERS = [
-    'content-type',
-    'x-csrftoken',
-]
 
 
 TEMPLATES = [
