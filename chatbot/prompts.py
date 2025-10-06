@@ -1,15 +1,15 @@
-# prompts.py
-# این فایل برای سازگاری باقی مانده است؛ در نسخهٔ سریع، از fast_analyze_query استفاده می‌کنیم.
 ANALYSIS_PROMPT = """\
 Extract car models and other search terms from the user’s message.
-Return ONLY a JSON object:
+Return **only** a JSON object of the form:
 
-{
-  "<canonical model>": {
+{{
+  "<canonical model>": {{
     "aliases": ["<English spelling>", "<Farsi spelling>"],
-    "keywords": ["<kw1>", "<kw2>"]
-  }
-}
+    "keywords": ["<other keyword1>", "<keyword2>", …]
+  }},
+  …
+}}
 
+Generate both English & Farsi aliases for each model. Do not output anything else.
 User: {user_query}
 """
