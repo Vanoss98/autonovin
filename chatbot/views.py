@@ -183,3 +183,82 @@ class ChatAPIView(APIView):
             "answer": answer,
             "history": history_ua,
         })
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GET /api/chat/<thread_id>/  →  return full history (images/sources per turn)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@method_decorator(csrf_exempt, name="dispatch")
+class ChatHistoryAPIView(APIView):
+    def get(self, request, thread_id: str):
+        from .agent import get_thread_messages  # local import to avoid cycles
+        msgs = get_thread_messages(thread_id) or []
+        if not msgs:
+            return Response({"thread_id": thread_id, "history": [], "turns": []}, status=status.HTTP_200_OK)
+
+        # 1) Linearize raw messages (keep tool/system for bounded lookup)
+        linear = []
+        for m in msgs:
+            role = _role_of_langchain_msg(m)
+            linear.append({"role": role, "content_raw": _content_to_raw_str(m.content)})
+
+        # 2) Collect per-assistant page_ids & sources
+        assistant_indices = [i for i, r in enumerate(linear) if linear[i]["role"] == "assistant"]
+        per_assistant_page_ids: dict[int, list[int]] = {}
+        per_assistant_sources: dict[int, list[str]] = {}
+        all_page_ids: list[int] = []
+
+        for ai in assistant_indices:
+            # From assistant JSON
+            content_disp = linear[ai]["content_raw"]
+            urls_from_assistant = []
+            try:
+                payload = json.loads(content_disp)
+                if isinstance(payload, dict) and "response" in payload:
+                    content_disp = payload.get("response", content_disp)
+                    urls_from_assistant = payload.get("urls", []) or []
+            except Exception:
+                pass
+            linear[ai]["content_disp"] = content_disp
+
+            # From bounded tool
+            pids, urls_from_tool = _nearest_tool_before_bounded(linear, assistant_idx=ai)
+            per_assistant_page_ids[ai] = pids
+            all_page_ids.extend(pids)
+
+            # Prefer assistant urls; else tool urls
+            per_assistant_sources[ai] = urls_from_assistant if urls_from_assistant else urls_from_tool
+
+        # 3) Batch images
+        all_page_ids = list(dict.fromkeys(all_page_ids))
+        page_images_map = _build_page_images_map(all_page_ids, request)
+
+        # 4) Build user/assistant-only history with images/sources per assistant
+        history_ua = []
+        for i, rec in enumerate(linear):
+            role = rec["role"]
+            if role == "tool" or role == "system":
+                continue
+            if role == "user":
+                history_ua.append({"role": "user", "content": rec["content_raw"]})
+            elif role == "assistant":
+                pids = per_assistant_page_ids.get(i, []) or []
+                imgs = []
+                for pid in pids:
+                    imgs.extend(page_images_map.get(pid, []))
+                imgs = list(dict.fromkeys(imgs))
+                history_ua.append({
+                    "role": "assistant",
+                    "content": rec.get("content_disp", rec["content_raw"]),
+                    "images": imgs,
+                    "sources": per_assistant_sources.get(i, []) or [],
+                })
+
+        # 5) Turn ids + pairs
+        _annotate_turn_ids_inplace(history_ua)
+        turns = _build_turn_pairs(history_ua)
+
+        return Response({
+            "thread_id": thread_id,
+            "history": history_ua,
+        }, status=status.HTTP_200_OK)
