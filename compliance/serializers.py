@@ -6,6 +6,7 @@ class BrandModelRetrieveSerializer(serializers.Serializer):
     exclude_seed = serializers.BooleanField(required=False, default=True)
     threshold = serializers.FloatField(required=False, default=0.70)
     type = serializers.ChoiceField(choices=["sell", "buy"], required=False)
+    nationalCode = serializers.CharField(required=True, allow_blank=False, trim_whitespace=True)
 
     def validate(self, attrs):
         raw = str(attrs["id"]).strip()
