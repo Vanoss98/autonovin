@@ -13,16 +13,18 @@ from .utils import (
     compliance_scores_mixed,
     TOP_K,
 )
+from rest_framework import status
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 
 log = logging.getLogger(__name__)
 
-CHROMA_HOST = os.getenv("CHROMA_HOST", "chroma")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", 8000))
-CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "car_ads")
+CHROMA_HOST = settings.CHROMA_HOST
+CHROMA_PORT = int(settings.CHROMA_PORT)
+CHROMA_COLLECTION = "car_ads"
+OPENAI_KEY = settings.OPENAI_API_KEY
 
-embeddings = OpenAIEmbeddings(model="text-embedding-3-large", dimensions=1024)
+embeddings = OpenAIEmbeddings(model="text-embedding-3-large", dimensions=1024, api_key=OPENAI_KEY)
 _client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
 COL = _client.get_or_create_collection(CHROMA_COLLECTION)
 store = Chroma(client=_client, collection_name=CHROMA_COLLECTION, embedding_function=embeddings)
@@ -31,115 +33,147 @@ store = Chroma(client=_client, collection_name=CHROMA_COLLECTION, embedding_func
 class RetrieveAdsByBrandModelView(APIView):
     """
     Cross-type retrieval:
-      - If seed is BUY  -> shortlist SELL ads of same brand/model, then range-aware scoring.
-      - If seed is SELL -> shortlist SELL ads (or you can later expand to also show BUY ask matches).
+      - BUY seed  -> shortlist SELL ads of same brand/model, then range-aware scoring.
+      - SELL seed -> shortlist SELL ads.
+    Excludes candidates with the same national_code as the seed (user’s own ads).
+
+    NEW: Requires 'nationalCode' in payload. We verify the seed ad belongs to that national code
+    before proceeding.
     """
 
-    # SELL numeric keys (candidate cleaning)
     NUMERIC_KEYS_SELL = ["year", "mileage", "insurance_mo", "price", "lat", "lon"]
 
     def _to_float_or_none(self, v):
         try:
-            if v is None: return None
+            if v is None:
+                return None
             s = str(v).strip()
-            if s == "": return None
+            if s == "":
+                return None
             return float(s)
         except Exception:
             return None
 
     def _clean_sell(self, meta: dict):
-        # Keep the ad and normalize types; missing -> None (we'll mask in scoring)
-        m = dict(meta)
+        m = dict(meta or {})
         for k in self.NUMERIC_KEYS_SELL:
             m[k] = self._to_float_or_none(m.get(k))
-        # color_id stays a normalized string; empty -> ""
+        # keep color id as normalized string
         m["color_id"] = str(m.get("color_id", "")).strip().lower()
+        # pass-through extra fields (helpful for UI)
+        for k in ("color_name", "color_name_en", "national_code"):
+            if k in meta:
+                m[k] = meta.get(k)
         return m
+
+    @staticmethod
+    def _norm_nc(x):
+        # normalize nationalCode for comparison; tweak if you want digits-only
+        return (str(x or "")).strip()
 
     def post(self, request):
         ser = BrandModelRetrieveSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        seed_id = ser.validated_data["id"]
+
+        seed_id   = ser.validated_data["id"]
         excl_seed = ser.validated_data["exclude_seed"]
-        thresh = ser.validated_data["threshold"]
+        thresh    = ser.validated_data["threshold"]
+        req_nc    = self._norm_nc(ser.validated_data["nationalCode"])
 
-        # 1) fetch seed ad (meta + embedding)
+        # 1) fetch seed ad
         seed = COL.get(ids=[str(seed_id)], include=["metadatas", "embeddings"])
-        if not seed["ids"]:
-            return Response({"detail": "Seed ad not found"}, status=404)
+        if not seed.get("ids"):
+            return Response({"detail": "Seed ad not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        seed_meta = seed["metadatas"][0]
-        seed_vec = seed["embeddings"][0]
-        seed_type = seed_meta.get("type", "sell")
+        seed_meta = seed["metadatas"][0] or {}
+        seed_vec  = seed["embeddings"][0]
+        seed_type = (seed_meta.get("type") or "sell").lower()
+        seed_nc   = self._norm_nc(seed_meta.get("national_code"))
+
+        # 1.a) nationalCode ownership check
+        if not seed_nc:
+            return Response(
+                {"detail": "Seed ad has no national_code recorded; cannot verify ownership.",
+                 "seed_id": seed_id},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if seed_nc != req_nc:
+            return Response(
+                {
+                    "detail": "Seed ad does not belong to the provided nationalCode.",
+                    "seed_id": seed_id,
+                    "provided_nationalCode": req_nc,
+                    "seed_national_code": seed_nc,
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         brand_id = seed_meta.get("brand_id")
         model_id = seed_meta.get("model_id")
 
-        # 2) shortlist via ANN (same brand & model, opposite type if BUY)
-        target_type = "sell" if seed_type == "buy" else "sell"  # currently return SELL candidates for both
-
-        where = {"$and": [{"brand_id": brand_id}, {"model_id": model_id}, {"type": target_type}]}
+        # 2) shortlist via ANN (same brand & model, SELL candidates)
+        where = {"$and": [{"brand_id": brand_id}, {"model_id": model_id}, {"type": "sell"}]}
 
         hits = COL.query(
             query_embeddings=[seed_vec],
             n_results=TOP_K,
             where=where,
-            include=["metadatas", "embeddings", "distances"],
+            include=["metadatas", "embeddings", "distances"],  # do NOT put "ids" here
         )
 
-        cand_ids = hits["ids"][0] if hits.get("ids") else []
-        cand_meta = hits["metadatas"][0] if hits.get("metadatas") else []
-        cand_vecs = hits["embeddings"][0] if hits.get("embeddings") else []
+        cand_ids  = (hits.get("ids") or [[]])[0]
+        cand_meta = (hits.get("metadatas") or [[]])[0]
+        cand_vecs = (hits.get("embeddings") or [[]])[0]
 
         rows = []
         for i, meta, vec in zip(cand_ids, cand_meta, cand_vecs):
             if excl_seed and str(i) == str(seed_id):
                 continue
-            # we currently only score SELL candidates (single values)
+            # exclude same national_code (user’s own ads)
+            cand_nc = self._norm_nc((meta or {}).get("national_code"))
+            if seed_nc and cand_nc and cand_nc == seed_nc:
+                continue
             clean = self._clean_sell(meta)
             rows.append((i, clean, vec))
 
         if not rows:
-            return Response({"ads": []}, status=200)
+            return Response({"ads": []}, status=status.HTTP_200_OK)
 
         ids, metas, vecs = map(list, zip(*rows))
 
-        # 3) second-pass Python ranking with missing-field masking
+        # 3) Python ranking (BUY seed uses range-aware scorer)
         if seed_type == "buy":
             scores = compliance_scores_mixed(seed_meta, metas, seed_vec, vecs)
         else:
             scores = compliance_scores(seed_meta, metas, seed_vec, vecs)
 
         ads = [
-            {"id": i,
-             "score_pct": round(float(s) * 100, 1),
-             "metadata": meta}
+            {"id": i, "score_pct": round(float(s) * 100, 1), "metadata": meta}
             for i, s, meta in zip(ids, scores, metas)
             if s >= thresh
         ]
         ads.sort(key=lambda x: x["score_pct"], reverse=True)
 
-        # Debug (optional)
-        log.warning("Seed meta=%s", pprint.pformat(seed_meta))
-        log.warning("First cand=%s", pprint.pformat(metas[0]) if metas else "N/A")
-        log.warning("len(seed_vec)=%d  len(cand_vec0)=%d",
-                    len(seed_vec), len(vecs[0]) if vecs else -1)
-
-        return Response({"ads": ads}, status=200)
-
+        log.warning("Seed meta=%s", seed_meta)
+        return Response({"ads": ads}, status=status.HTTP_200_OK)
 
 RABBIT_HOST = settings.RABBIT_HOST
 RABBIT_PORT = settings.RABBIT_PORT
 RABBIT_USER = settings.RABBIT_USER
 RABBIT_PASS = settings.RABBIT_PASS
-QUEUE_NAME = "car_ads"
+QUEUE_NAME = "OrderManagement.Application.Contracts.OrderManagement.Dtos.CustomerAdvertisement.sell.Compliance.etowithque:CustomerAdvertiseSellComplianceEto_skipped"
 
 
 def _open_channel():
-    creds = pika.PlainCredentials(RABBIT_USER, RABBIT_PASS)
-    params = pika.ConnectionParameters(host=RABBIT_HOST,
-                                       port=RABBIT_PORT,
-                                       credentials=creds,
-                                       blocked_connection_timeout=2)
+    creds = pika.PlainCredentials(settings.RABBIT_USER, settings.RABBIT_PASS)
+    params = pika.ConnectionParameters(
+        host=settings.RABBIT_HOST,
+        port=int(settings.RABBIT_PORT),
+        virtual_host=getattr(settings, "RABBIT_VHOST", "/"),
+        credentials=creds,
+        blocked_connection_timeout=2,
+    )
     conn = pika.BlockingConnection(params)
     return conn, conn.channel()
 
@@ -147,36 +181,38 @@ def _open_channel():
 @api_view(["GET"])
 def queue_peek(request):
     """
-    GET /api/v1/compliance/queue-peek/?max=5
-
-    Returns up to `max` un-acked messages (default 5) **without** removing
-    them from the queue (requeued).
+    GET /api/v1/compliance/queue-peek/?max=5&q=buy|sell
+    Peeks up to `max` messages (requeues them). By default uses BUY queue.
     """
     max_n = int(request.GET.get("max", 5))
-    msgs = []
+    qsel = (request.GET.get("q") or "buy").strip().lower()
+    qname = settings.COMPLIANCE_QUEUE_BUY if qsel == "buy" else settings.COMPLIANCE_QUEUE_SELL
 
+    msgs = []
     try:
         conn, ch = _open_channel()
 
         # passive declare to fetch message_count
-        q = ch.queue_declare(queue=QUEUE_NAME, passive=True)
+        q = ch.queue_declare(queue=qname, passive=True)
         total = q.method.message_count
 
         for _ in range(max_n):
-            method, props, body = ch.basic_get(queue=QUEUE_NAME, auto_ack=False)
-            if method is None:  # queue empty
+            method, props, body = ch.basic_get(queue=qname, auto_ack=False)
+            if method is None:
                 break
-            # body is bytes → json
             try:
                 payload = json.loads(body)
             except Exception:
                 payload = body.decode(errors="ignore")
+
+            # if you *only* want the message core uncomment the next line:
+            # payload = (payload.get("message") if isinstance(payload, dict) else payload) or payload
+
             msgs.append(payload)
-            # requeue so worker will still get it
             ch.basic_nack(method.delivery_tag, requeue=True)
 
         conn.close()
-        return Response({"total_in_queue": total, "peek": msgs}, status=200)
+        return Response({"queue": qname, "total_in_queue": total, "peek": msgs}, status=200)
 
     except Exception as exc:
         return Response({"detail": str(exc)}, status=503)
@@ -254,3 +290,139 @@ def chroma_dump(request):
 
     except Exception as exc:
         return Response({"detail": str(exc)}, status=500)
+
+
+
+# ---- Sample seeder -------------------------------------------------------
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from django.conf import settings
+import time
+
+def _ad_to_text_buy(m):
+    return (f"BUY brand:{m.get('brand_id')} model:{m.get('model_id')} "
+            f"color_id:{m.get('color_id')} color_en:{m.get('color_name_en')} "
+            f"year:{m.get('from_year')}-{m.get('to_year')} "
+            f"km:{m.get('from_km')}-{m.get('to_km')} "
+            f"price:{m.get('from_price')}-{m.get('to_price')} "
+            f"insurance_mo:{m.get('from_insurance_mo')}-{m.get('to_insurance_mo')} "
+            f"@({m.get('lat')},{m.get('lon')})")
+
+def _ad_to_text_sell(m):
+    return (f"SELL brand:{m.get('brand_id')} model:{m.get('model_id')} "
+            f"color_id:{m.get('color_id')} color_en:{m.get('color_name_en')} "
+            f"year:{m.get('year')} km:{m.get('mileage')} "
+            f"price:{m.get('price')} insurance_mo:{m.get('insurance_mo')} "
+            f"@({m.get('lat')},{m.get('lon')})")
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def seed_sample_ads(request):
+    """
+    POST /api/v1/compliance/seed-sample-ads/
+
+    Wipes the current Chroma collection and inserts 10 sample ads:
+      - 5 BUY ads (brand_id=405, model_id=501, color_id '29' pearl white)
+      - 5 SELL ads (brand_id=405, model_id=501, color_id '23' black)
+    All with distinct national_code values for exclusion testing.
+    """
+    # 1) reset collection hard (delete + recreate)
+    global COL
+    coll_name = CHROMA_COLLECTION
+    try:
+        _client.delete_collection(coll_name)
+    except Exception:
+        pass
+    COL = _client.get_or_create_collection(coll_name)
+
+    # 2) define samples (same brand/model so your shortlist hits)
+    buy_nc = ["1111111111","2222222222","3333333333","4444444444","5555555555"]
+    sell_nc= ["6666666666","7777777777","8888888888","9999999999","0000000000"]
+
+    # BUY templates (range-based)
+    buys = []
+    for i, nc in enumerate(buy_nc, start=1):
+        buys.append({
+            "id": f"buy:TEST{i:02d}",
+            "metadata": {
+                "type": "buy",
+                "brand_id": 405,
+                "model_id": 501,
+                "color_id": "29",
+                "color_name": "سفيد صدفي",
+                "color_name_en": "pearl white",
+                "from_year": 2020.0,
+                "to_year":   2025.0,
+                "from_km": 1.0,
+                "to_km":   100.0,
+                "from_price": 10.0,
+                "to_price":   100000.0,
+                "from_insurance_mo": 1.0,
+                "to_insurance_mo":   2.0,
+                "lat": None,
+                "lon": None,
+                "national_code": nc,
+            }
+        })
+
+    # SELL templates (point-values)
+    sells = []
+    for i, nc in enumerate(sell_nc, start=1):
+        sells.append({
+            "id": f"sell:TEST{i:02d}",
+            "metadata": {
+                "type": "sell",
+                "brand_id": 405,      # NOTE: match brand to BUY so your where-filter works
+                "model_id": 501,
+                "color_id": "23",
+                "color_name": "مشکی",
+                "color_name_en": "black",
+                "year": 2024.0,
+                "mileage": 10.0,
+                "price": 100000000.0,
+                "insurance_mo": 0.0,
+                "lat": None,
+                "lon": None,
+                "national_code": nc,
+            }
+        })
+
+    # 3) build embeddings and upsert
+    ids, metas, embs = [], [], []
+
+    # BUY embeddings
+    for row in buys:
+        text = _ad_to_text_buy(row["metadata"])
+        vec = embeddings.embed_query(text)
+        ids.append(row["id"])
+        metas.append(row["metadata"])
+        embs.append(vec)
+
+    # SELL embeddings
+    for row in sells:
+        text = _ad_to_text_sell(row["metadata"])
+        vec = embeddings.embed_query(text)
+        ids.append(row["id"])
+        metas.append(row["metadata"])
+        embs.append(vec)
+
+    # upsert once (faster than per-row)
+    COL.upsert(ids=ids, metadatas=metas, embeddings=embs)
+
+    # small summary payload similar to your chroma_dump shape
+    items = []
+    for i, mid in enumerate(ids):
+        md = metas[i]
+        items.append({
+            "id": mid,
+            "type": md.get("type"),
+            "brand_id": md.get("brand_id"),
+            "model_id": md.get("model_id"),
+            "metadata": md,
+        })
+
+    return Response({
+        "collection": coll_name,
+        "inserted": len(items),
+        "items": items,
+    }, status=201)

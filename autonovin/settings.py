@@ -147,16 +147,35 @@ YOLO_WEIGHTS_PATH = MODEL_DIR / "LP-detection.pt"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL")
-CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND")
+RABBIT_HOST = os.environ.get("RABBIT_HOST", "192.168.4.48")
+RABBIT_PORT = os.environ.get("RABBIT_PORT", "5672")
+RABBIT_USER = os.environ.get("RABBIT_USER", "shohrati")
+RABBIT_PASS = os.environ.get("RABBIT_PASS", "shohrati")
+RABBIT_VHOST = os.environ.get("RABBIT_VHOST", "/")
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# Queues (your *_skipped queues)
+COMPLIANCE_QUEUE_SELL = os.environ.get(
+    "COMPLIANCE_QUEUE_SELL",
+    "OrderManagement.Application.Contracts.OrderManagement.Dtos.CustomerAdvertisement.sell.Compliance.etowithque:CustomerAdvertiseSellComplianceEto_skipped",
+)
+COMPLIANCE_QUEUE_BUY = os.environ.get(
+    "COMPLIANCE_QUEUE_BUY",
+    "OrderManagement.Application.Contracts.OrderManagement.Dtos.CustomerAdvertisement.buy.Compliance.etowithque:CustomerAdvertiseBuyComplianceEto_skipped",
+)
 
-RABBIT_HOST = os.environ.get("RABBIT_HOST")
-RABBIT_PORT = os.environ.get("RABBIT_PORT")
-RABBIT_USER = os.environ.get("RABBIT_USER")
-RABBIT_PASS = os.environ.get("RABBIT_PASS")
+# If CELERY_BROKER_URL is not explicitly provided, compose it from Rabbit vars.
+CELERY_BROKER_URL = os.environ.get(
+    "CELERY_BROKER_URL",
+    f"amqp://{RABBIT_USER}:{RABBIT_PASS}@{RABBIT_HOST}:{RABBIT_PORT}/{RABBIT_VHOST}"
+)
 
-COMPLIANCE_QUEUE_SELL = os.environ.get("COMPLIANCE_QUEUE_SELL")
-COMPLIANCE_QUEUE_BUY = os.environ.get("COMPLIANCE_QUEUE_BUY")
+# You can run without a result backend, but if you want one and env is missing, use RPC:
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "rpc://")
 
+# -------------------- Vector DB & OpenAI --------------------
+CHROMA_HOST = os.environ.get("CHROMA_HOST", "chroma")
+CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000"))
+CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "car_ads")
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+DJANGO_SETTINGS_MODULE = "autonovin.settings"

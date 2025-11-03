@@ -1,4 +1,6 @@
 # views.py
+from datetime import datetime
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -9,6 +11,8 @@ from collections import defaultdict
 from crawler.infrastructure.models import PageImage
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
+
+from .prompts import ANALYSIS_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -317,3 +321,243 @@ class ChatHistoryAPIView(APIView):
             "thread_id": thread_id,
             "history": history_ua,
         }, status=status.HTTP_200_OK)
+
+
+# @method_decorator(csrf_exempt, name="dispatch")
+# class AnalyzeQueryAPIView(APIView):
+#     """
+#     Test endpoint for query analysis, retrieval, AND final LLM response.
+#     Returns analysis results, retrieved documents, and generated answer.
+#     """
+#
+#     def post(self, request):
+#         query = request.data.get("query")
+#         if not query:
+#             return Response(
+#                 {"error": "Field 'query' is required."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+#
+#         # Optional parameters for retrieval
+#         top_k = request.data.get("top_k", 5)
+#         alpha = request.data.get("alpha", 0.45)
+#         beta = request.data.get("beta", 0.40)
+#         gamma = request.data.get("gamma", 0.15)
+#         show_full_content = request.data.get("show_full_content", False)
+#         include_llm_response = request.data.get("include_llm_response", True)
+#
+#         # Timing tracking
+#         import time
+#         timings = {}
+#         start_total = time.time()
+#
+#         try:
+#             from .utils import analyze_query, hybrid_search, generate_answer
+#
+#             # Step 1: Query Analysis
+#             start_step = time.time()
+#             analysis_result = analyze_query(query)
+#             timings["analysis"] = round(time.time() - start_step, 3)
+#
+#             # Format analysis for display
+#             formatted_analysis = {}
+#             for model, info in analysis_result.items():
+#                 formatted_analysis[model] = {
+#                     "aliases": info.get("aliases", []),
+#                     "keywords": info.get("keywords", [])
+#                 }
+#
+#             # Step 2: Hybrid Retrieval
+#             start_step = time.time()
+#             retrieval_result = hybrid_search(
+#                 analysis_result,
+#                 top_k=top_k,
+#                 alpha=alpha,
+#                 beta=beta,
+#                 gamma=gamma
+#             )
+#             timings["retrieval"] = round(time.time() - start_step, 3)
+#
+#             # Format retrieval results and prepare for LLM (like ChatAPIView)
+#             formatted_retrieval = {}
+#             all_urls = set()
+#             all_page_ids = set()
+#             total_docs = 0
+#
+#             # Collect docs in the format ChatAPIView uses (8-element tuples without page_id)
+#             all_docs_for_llm = []
+#
+#             for model, docs in retrieval_result.items():
+#                 formatted_docs = []
+#                 for doc in docs:
+#                     # Unpack document tuple (9 elements with page_id)
+#                     doc_data = {
+#                         "chunk_id": doc[0],
+#                         "title": doc[1],
+#                         "content": doc[2] if show_full_content else (
+#                             doc[2][:300] + "..." if len(doc[2]) > 300 else doc[2]),
+#                         "score": round(doc[3], 4) if isinstance(doc[3], (int, float)) else doc[3],
+#                         "images": doc[4] if len(doc) > 4 else [],
+#                         "model_id": doc[5] if len(doc) > 5 else None,
+#                         "url": doc[6] if len(doc) > 6 else None,
+#                         "source": doc[7] if len(doc) > 7 else None,
+#                         "page_id": doc[8] if len(doc) > 8 else None
+#                     }
+#
+#                     formatted_docs.append(doc_data)
+#
+#                     # Convert to 8-element tuple for LLM (exclude page_id like ChatAPIView does)
+#                     doc_for_llm = (
+#                         doc[0],  # chunk_id
+#                         doc[1],  # title
+#                         doc[2],  # content
+#                         doc[3],  # score
+#                         doc[4] if len(doc) > 4 else [],  # images
+#                         doc[5] if len(doc) > 5 else None,  # model_id
+#                         doc[6] if len(doc) > 6 else None,  # url
+#                         doc[7] if len(doc) > 7 else None  # source_name
+#                         # page_id (doc[8]) is intentionally excluded
+#                     )
+#                     all_docs_for_llm.append(doc_for_llm)
+#
+#                     # Collect unique URLs and page_ids
+#                     if doc_data["url"]:
+#                         all_urls.add(doc_data["url"])
+#                     if doc_data["page_id"]:
+#                         all_page_ids.add(doc_data["page_id"])
+#
+#                     total_docs += 1
+#
+#                 formatted_retrieval[model] = formatted_docs
+#
+#             # Step 3: Generate LLM Response (if requested)
+#             llm_response_data = None
+#             if include_llm_response and all_docs_for_llm:
+#                 start_step = time.time()
+#                 try:
+#                     answer_clean, chunk_ids_used, urls_used = generate_answer(
+#                         query,
+#                         all_docs_for_llm  # Now passing 8-element tuples like ChatAPIView
+#                     )
+#                     timings["llm_generation"] = round(time.time() - start_step, 3)
+#
+#                     llm_response_data = {
+#                         "answer": answer_clean,
+#                         "chunk_ids_used": chunk_ids_used,
+#                         "urls_used": urls_used,
+#                         "generation_time_seconds": timings["llm_generation"]
+#                     }
+#                 except Exception as llm_exc:
+#                     logger.exception("LLM generation failed")
+#                     timings["llm_generation"] = round(time.time() - start_step, 3)
+#                     llm_response_data = {
+#                         "error": str(llm_exc),
+#                         "error_type": llm_exc.__class__.__name__,
+#                         "generation_time_seconds": timings["llm_generation"]
+#                     }
+#                     if settings.DEBUG:
+#                         llm_response_data["traceback"] = traceback.format_exc()
+#
+#             timings["total"] = round(time.time() - start_total, 3)
+#
+#             # Calculate statistics
+#             stats = {
+#                 "models_analyzed": len(formatted_analysis),
+#                 "total_documents_retrieved": total_docs,
+#                 "documents_per_model": {model: len(docs) for model, docs in formatted_retrieval.items()},
+#                 "unique_urls_count": len(all_urls),
+#                 "unique_page_ids_count": len(all_page_ids),
+#                 "avg_docs_per_model": round(total_docs / len(formatted_analysis), 2) if formatted_analysis else 0
+#             }
+#
+#             # Get score distribution for each model
+#             score_distribution = {}
+#             for model, docs in formatted_retrieval.items():
+#                 if docs:
+#                     scores = [d["score"] for d in docs if isinstance(d["score"], (int, float))]
+#                     if scores:
+#                         score_distribution[model] = {
+#                             "max": round(max(scores), 4),
+#                             "min": round(min(scores), 4),
+#                             "avg": round(sum(scores) / len(scores), 4),
+#                             "count": len(scores)
+#                         }
+#
+#             response_data = {
+#                 "query": query,
+#                 "timestamp": datetime.now().isoformat(),
+#
+#                 # Performance Metrics
+#                 "performance": {
+#                     "timings_seconds": timings,
+#                     "bottleneck": max(timings.items(), key=lambda x: x[1])[0] if timings else None,
+#                     "bottleneck_time": max(timings.values()) if timings else None,
+#                     "bottleneck_percentage": round((max(timings.values()) / timings["total"] * 100), 1) if timings.get(
+#                         "total") else None
+#                 },
+#
+#                 # Analysis Results
+#                 "analysis": {
+#                     "models": formatted_analysis,
+#                     "model_count": len(formatted_analysis),
+#                     "total_keywords": sum(len(info["keywords"]) for info in formatted_analysis.values()),
+#                     "total_aliases": sum(len(info["aliases"]) for info in formatted_analysis.values())
+#                 },
+#
+#                 # Retrieval Results
+#                 "retrieval": {
+#                     "documents": formatted_retrieval,
+#                     "parameters": {
+#                         "top_k": top_k,
+#                         "alpha_bm25": alpha,
+#                         "beta_vector": beta,
+#                         "gamma_keyword": gamma
+#                     },
+#                     "score_distribution": score_distribution
+#                 },
+#
+#                 # LLM Response (if generated)
+#                 "llm_response": llm_response_data,
+#
+#                 # Summary Statistics
+#                 "statistics": stats,
+#
+#                 # Unique Resources
+#                 "resources": {
+#                     "urls": sorted(list(all_urls)),
+#                     "page_ids": sorted(list(all_page_ids))
+#                 }
+#             }
+#
+#             # Add debug info if requested
+#             if request.data.get("debug"):
+#                 response_data["debug"] = {
+#                     "retrieval_method": "hybrid_search",
+#                     "vector_model": "text-embedding-3-large",
+#                     "chroma_collection": "car_spec",
+#                     "total_docs_sent_to_llm": len(all_docs_for_llm),
+#                     "doc_tuple_format": "8-element (chunk_id, title, content, score, images, model_id, url, source_name)"
+#                 }
+#
+#             return Response(response_data, status=status.HTTP_200_OK)
+#
+#         except Exception as exc:
+#             logger.exception("Analysis and retrieval failed")
+#             error_response = {
+#                 "error": "Failed to analyze and retrieve",
+#                 "query": query,
+#                 "timestamp": datetime.now().isoformat(),
+#                 "timings_before_failure": timings
+#             }
+#
+#             if settings.DEBUG:
+#                 error_response.update({
+#                     "exception": str(exc),
+#                     "type": exc.__class__.__name__,
+#                     "traceback": traceback.format_exc()
+#                 })
+#
+#             return Response(
+#                 error_response,
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
