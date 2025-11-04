@@ -1,6 +1,7 @@
 # views.py
 from datetime import datetime
-
+from typing import List, Dict
+from urllib.parse import urlparse, urlunparse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -11,14 +12,48 @@ from collections import defaultdict
 from crawler.infrastructure.models import PageImage
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-
 from .prompts import ANALYSIS_PROMPT
+
 
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
+BASE_MEDIA_ORIGIN = "https://llm.autonovin.ir"
+
+def _force_origin(u: str) -> str:
+    """
+    Force ANY URL (absolute or relative) to live under https://llm.autonovin.ir.
+    - If u is absolute (http/https), replace scheme+netloc with our origin, keep path/query/fragment.
+    - If u is relative, prefix with origin and ensure leading slash.
+    """
+    if not u:
+        return u
+    try:
+        p = urlparse(u)
+        # Absolute URL?
+        if p.scheme in ("http", "https") and p.netloc:
+            # Keep path/query/fragment, swap scheme+netloc
+            origin = urlparse(BASE_MEDIA_ORIGIN)
+            new_parts = (
+                origin.scheme or "https",
+                origin.netloc,
+                p.path if p.path.startswith("/") else f"/{p.path}",
+                p.params,
+                p.query,
+                p.fragment,
+            )
+            return urlunparse(new_parts)
+        # Relative URL -> slap origin in front
+        path = u if u.startswith("/") else f"/{u}"
+        origin = urlparse(BASE_MEDIA_ORIGIN)
+        new_parts = (origin.scheme or "https", origin.netloc, path, "", "", "")
+        return urlunparse(new_parts)
+    except Exception:
+        # Fallback: best-effort join
+        cleaned = u.lstrip("/")
+        return f"{BASE_MEDIA_ORIGIN}/{cleaned}"
 
 def _flatten_images(images_by_page: dict[int, list[str]]) -> list[str]:
     out = []
@@ -137,10 +172,6 @@ def _build_turn_pairs(history_ua: list[dict]) -> list[dict]:
             cur = {}
     return pairs
 
-# ──────────────────────────────────────────────────────────────────────────────
-# POST /api/chat/  →  run a turn, return current answer + complete history
-# ──────────────────────────────────────────────────────────────────────────────
-
 @method_decorator(csrf_exempt, name="dispatch")
 class ChatAPIView(APIView):
     def post(self, request):
@@ -172,15 +203,15 @@ class ChatAPIView(APIView):
             linear.append({"role": role, "content_raw": _content_to_raw_str(m.content)})
 
         # 2) For every assistant message, bind to its own tool (bounded) and collect page_ids/urls
-        assistant_indices = [i for i, r in enumerate(linear) if linear[i]["role"] == "assistant"]
-        per_assistant_page_ids: dict[int, list[int]] = {}
-        per_assistant_sources: dict[int, list[str]] = {}
-        all_page_ids: list[int] = []
+        assistant_indices = [i for i, _ in enumerate(linear) if linear[i]["role"] == "assistant"]
+        per_assistant_page_ids: Dict[int, List[int]] = {}
+        per_assistant_sources: Dict[int, List[str]] = {}
+        all_page_ids: List[int] = []
 
         for ai in assistant_indices:
             # Parse assistant JSON for display text + assistant-declared urls
             content_disp = linear[ai]["content_raw"]
-            urls_from_assistant = []
+            urls_from_assistant: List[str] = []
             try:
                 payload = json.loads(content_disp)
                 if isinstance(payload, dict) and "response" in payload:
@@ -207,17 +238,19 @@ class ChatAPIView(APIView):
         history_ua = []
         for i, rec in enumerate(linear):
             role = rec["role"]
-            if role == "tool" or role == "system":
+            if role in ("tool", "system"):
                 continue
             if role == "user":
                 history_ua.append({"role": "user", "content": rec["content_raw"]})
             elif role == "assistant":
                 # Flatten images for this assistant, ordered by page_ids
                 pids = per_assistant_page_ids.get(i, []) or []
-                imgs = []
+                imgs: List[str] = []
                 for pid in pids:
                     imgs.extend(page_images_map.get(pid, []))
-                imgs = list(dict.fromkeys(imgs))
+
+                # Force-rehost everything to llm.autonovin.ir and de-dupe
+                imgs = list(dict.fromkeys(_force_origin(x) for x in imgs))
 
                 history_ua.append({
                     "role": "assistant",
@@ -226,22 +259,27 @@ class ChatAPIView(APIView):
                     "sources": per_assistant_sources.get(i, []) or [],
                 })
 
-        # 5) Annotate turn ids and build pairs
+        # 5) Annotate turn ids and (optionally) build pairs
         _annotate_turn_ids_inplace(history_ua)
-        turns = _build_turn_pairs(history_ua)
+        turns = _build_turn_pairs(history_ua)  # kept if you need it later
 
-        # 6) Top-level images: ONLY for the current turn (last assistant)
+        # 6) (Optional) current images by page — also force origin for consistency
         current_ai = assistant_indices[-1] if assistant_indices else None
         current_images_by_page = {}
         if current_ai is not None:
             current_pids = per_assistant_page_ids.get(current_ai, []) or []
-            current_images_by_page = {pid: page_images_map.get(pid, []) for pid in current_pids if page_images_map.get(pid)}
+            for pid in current_pids:
+                raw_imgs = page_images_map.get(pid, []) or []
+                abs_imgs = list(dict.fromkeys(_force_origin(x) for x in raw_imgs))
+                if abs_imgs:
+                    current_images_by_page[pid] = abs_imgs
 
         return Response({
             "thread_id": thread_id_out,
             "answer": answer,
             "history": history_ua,
-        })
+        }, status=status.HTTP_200_OK)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # GET /api/chat/<thread_id>/  →  return full history (images/sources per turn)
@@ -253,7 +291,7 @@ class ChatHistoryAPIView(APIView):
         from .agent import get_thread_messages  # local import to avoid cycles
         msgs = get_thread_messages(thread_id) or []
         if not msgs:
-            return Response({"thread_id": thread_id, "history": [], "turns": []}, status=status.HTTP_200_OK)
+            return Response({"thread_id": thread_id, "history": []}, status=status.HTTP_200_OK)
 
         # 1) Linearize raw messages (keep tool/system for bounded lookup)
         linear = []
@@ -262,15 +300,15 @@ class ChatHistoryAPIView(APIView):
             linear.append({"role": role, "content_raw": _content_to_raw_str(m.content)})
 
         # 2) Collect per-assistant page_ids & sources
-        assistant_indices = [i for i, r in enumerate(linear) if linear[i]["role"] == "assistant"]
-        per_assistant_page_ids: dict[int, list[int]] = {}
-        per_assistant_sources: dict[int, list[str]] = {}
-        all_page_ids: list[int] = []
+        assistant_indices = [i for i, _ in enumerate(linear) if linear[i]["role"] == "assistant"]
+        per_assistant_page_ids: Dict[int, List[int]] = {}
+        per_assistant_sources: Dict[int, List[str]] = {}
+        all_page_ids: List[int] = []
 
         for ai in assistant_indices:
             # From assistant JSON
             content_disp = linear[ai]["content_raw"]
-            urls_from_assistant = []
+            urls_from_assistant: List[str] = []
             try:
                 payload = json.loads(content_disp)
                 if isinstance(payload, dict) and "response" in payload:
@@ -296,16 +334,19 @@ class ChatHistoryAPIView(APIView):
         history_ua = []
         for i, rec in enumerate(linear):
             role = rec["role"]
-            if role == "tool" or role == "system":
+            if role in ("tool", "system"):
                 continue
             if role == "user":
                 history_ua.append({"role": "user", "content": rec["content_raw"]})
             elif role == "assistant":
                 pids = per_assistant_page_ids.get(i, []) or []
-                imgs = []
+                imgs: List[str] = []
                 for pid in pids:
                     imgs.extend(page_images_map.get(pid, []))
-                imgs = list(dict.fromkeys(imgs))
+
+                # Force-rehost everything to llm.autonovin.ir and de-dupe
+                imgs = list(dict.fromkeys(_force_origin(x) for x in imgs))
+
                 history_ua.append({
                     "role": "assistant",
                     "content": rec.get("content_disp", rec["content_raw"]),
@@ -313,7 +354,7 @@ class ChatHistoryAPIView(APIView):
                     "sources": per_assistant_sources.get(i, []) or [],
                 })
 
-        # 5) Turn ids + pairs
+        # 5) Turn ids + pairs (pairs kept for parity)
         _annotate_turn_ids_inplace(history_ua)
         turns = _build_turn_pairs(history_ua)
 
@@ -321,7 +362,6 @@ class ChatHistoryAPIView(APIView):
             "thread_id": thread_id,
             "history": history_ua,
         }, status=status.HTTP_200_OK)
-
 
 # @method_decorator(csrf_exempt, name="dispatch")
 # class AnalyzeQueryAPIView(APIView):
