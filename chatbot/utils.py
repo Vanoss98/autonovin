@@ -36,7 +36,7 @@ def analyze_query(user_query: str) -> Dict[str, Dict[str, List[str]]]:
     }
     """
     llm = ChatOpenAI(
-        model="gpt-4.1",
+        model="gpt-5",
         temperature=0.5,
         timeout=45,
         max_retries=3,
@@ -226,7 +226,7 @@ You are an automotive assistant. Respond strictly based on the information provi
 
 def generate_answer(user_query: str, docs: list):
     prompt = gen_answer_prompt(user_query, docs)
-    llm = ChatOpenAI(model="gpt-4.1", temperature=0, api_key=settings.OPENAI_API_KEY)
+    llm = ChatOpenAI(model="gpt-5", temperature=0, api_key=settings.OPENAI_API_KEY)
     sys_message = SystemMessage(content=prompt)
     response = llm.invoke([sys_message])
     answer_raw = response.content

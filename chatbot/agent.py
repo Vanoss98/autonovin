@@ -60,7 +60,7 @@ def serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
 
 
 # ── 1. base LLM ───────────────────────────────────────────────────────────
-llm = ChatOpenAI(model="gpt-4.1", temperature=0, api_key=settings.OPENAI_API_KEY, timeout=60.0, max_retries=5)
+llm = ChatOpenAI(model="gpt-5", temperature=0, api_key=settings.OPENAI_API_KEY, timeout=60.0, max_retries=5)
 
 
 # ── 2. tools ──────────────────────────────────────────────────────────────
