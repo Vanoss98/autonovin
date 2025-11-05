@@ -201,7 +201,7 @@ def hybrid_search(
                     m.get("url",""),     # 6
                     "car_spec",          # 7
                     page_id,             # 8
-                    m.get("car_model","")# 9  <-- NEW: used by model guard
+                    m.get("car_model","")# 9
                 )
             )
 
