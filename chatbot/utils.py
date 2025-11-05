@@ -1,22 +1,20 @@
-# utils.py
-import itertools
-import json
-import logging
-import re
-from typing import Dict, List, Tuple
-
+import os, json, re
 from django.conf import settings
-from langchain_chroma import Chroma
+from django.http import JsonResponse
+from django.shortcuts import render
 from langchain_core.messages import SystemMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
 from rank_bm25 import BM25Okapi
-
-from ingestion.service import chroma_client
+from langchain_core.caches import InMemoryCache
+from langchain_core.globals import set_llm_cache
 from .prompts import ANALYSIS_PROMPT
+from ingestion.service import chroma_client
+from typing import List, Tuple
+import itertools, unicodedata
+import json, logging
+from typing import Dict, List
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Embedding store
-# ──────────────────────────────────────────────────────────────────────────────
 
 EMBED_MODEL = "text-embedding-3-large"
 EMBED_DIM = 1024
@@ -28,47 +26,14 @@ vectordb = Chroma(
     embedding_function=EMBED,
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Normalization utils (reused by agent tool)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _flatten(xs):
-    return list(itertools.chain.from_iterable(xs))
-
-def _keyword_overlap(text: str, kws: List[str]) -> int:
-    tl = text.lower()
-    return sum(1 for kw in kws if kw.lower() in tl)
-
-def _norm(s: str) -> set[str]:
-    """Return two normalized variants (fa/en digits), collapse ZW characters."""
-    if not s:
-        return {""}
-    s = s.strip().lower()
-    s = s.replace("ي", "ی").replace("ك", "ک")  # arabic->persian
-    s = re.sub(r"[\u0640\u200c\u200f\u2060]", "", s)  # tatweel + ZW chars
-    s = re.sub(r"\s+", " ", s)
-    en2fa = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-    fa2en = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
-    return {s.translate(fa2en), s.translate(en2fa)}
-
-def _soft_contains(hay: str, aliases_norm: set[str]) -> bool:
-    """Substring check on a normalized haystack vs alias variants."""
-    h = next(iter(_norm(hay)))
-    return any(a in h for a in aliases_norm if a)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Analyzer
-# ──────────────────────────────────────────────────────────────────────────────
 
 def analyze_query(user_query: str) -> Dict[str, Dict[str, List[str]]]:
     """
-    Returns mapping:
-      {
-        "BMW X5": {"aliases": ["BMW X5","بی‌ام‌و X5"], "keywords": ["0-100","گیربکس"]},
-        "Audi A3L": {"aliases": ["Audi A3L","آئودی A3L"], "keywords": ["شتاب"]},
-        …
-      }
+    :returns: {
+      "BMW X5": {"aliases": ["BMW X5","بی‌ام‌و X5"], "keywords": ["0-100","گیربکس"]},
+      "Audi A3L": {"aliases": ["Audi A3L","آئودی A3L"], "keywords": ["شتاب"]},
+      …
+    }
     """
     llm = ChatOpenAI(
         model="gpt-4.1",
@@ -84,7 +49,7 @@ def analyze_query(user_query: str) -> Dict[str, Dict[str, List[str]]]:
         data = json.loads(raw)
         clean = {}
         for model, info in data.items():
-            aliases = list(dict.fromkeys((info.get("aliases") or []) + [model]))
+            aliases = list(dict.fromkeys(info.get("aliases", []) + [model]))
             keywords = list(dict.fromkeys(info.get("keywords", [])))
             clean[model] = {"aliases": aliases, "keywords": keywords}
         return clean
@@ -93,9 +58,29 @@ def analyze_query(user_query: str) -> Dict[str, Dict[str, List[str]]]:
         return {}
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Hybrid retrieval (now includes car_model(meta) at index 9)
-# ──────────────────────────────────────────────────────────────────────────────
+def _flatten(xs):
+    return list(itertools.chain.from_iterable(xs))
+
+def _keyword_overlap(text: str, kws: List[str]) -> int:
+    tl = text.lower()
+    return sum(1 for kw in kws if kw.lower() in tl)
+
+def _norm(s: str) -> set[str]:
+    if not s:
+        return {""}
+    s = s.strip().lower()
+    s = s.replace("ي","ی").replace("ك","ک")  # arabic->persian
+    s = re.sub(r"[\u0640\u200c\u200f\u2060]", "", s)  # tatweel/ZW
+    s = re.sub(r"\s+", " ", s)
+    # unify digits both ways
+    en2fa = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+    fa2en = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+    return { s.translate(fa2en), s.translate(en2fa) }  # return both variants
+
+def _soft_contains(hay: str, aliases_norm: set[str]) -> bool:
+    # normalize hay to one variant for substring check
+    h = next(iter(_norm(hay)))
+    return any(a in h for a in aliases_norm)
 
 def hybrid_search(
     analysis: Dict[str, Dict[str, List[str]]],
@@ -105,24 +90,10 @@ def hybrid_search(
     beta: float = 0.40,
     gamma: float = 0.15,
 ) -> Dict[str, List[Tuple]]:
-    """
-    Returns per-model list of tuples:
-      (
-        0 id,
-        1 title,
-        2 content,
-        3 fused_score,
-        4 images[],            # from metadata "images" (comma-separated originally)
-        5 model_id,            # from metadata
-        6 url,                 # from metadata
-        7 source_name,         # constant "car_spec"
-        8 page_id,             # from metadata
-        9 car_model_meta       # NEW: from metadata["car_model"]
-      )
-    """
     results: Dict[str, List[Tuple]] = {}
 
-    for model, info in (analysis or {}).items():
+    for model, info in analysis.items():
+        # 0) make sure the model key itself is used as an alias
         raw_aliases = list(dict.fromkeys((info.get("aliases") or []) + [model]))
         kws = info.get("keywords", [])  # allow empty
 
@@ -138,7 +109,7 @@ def hybrid_search(
         to_embed = " ".join(list(aliases_norm) + kws)
         vec = EMBED.embed_query(to_embed)
 
-        # 1) strict metadata filter by car_model
+        # 1) strict metadata filter (equality)
         where_meta = {"car_model": {"$in": list(aliases_norm)}}
         doc_scores = vectordb.similarity_search_by_vector_with_relevance_scores(
             vec, k=top_k * 3, filter=where_meta
@@ -189,7 +160,7 @@ def hybrid_search(
             fused = alpha * bm_scores[i] + beta * vec_scores[i] + bonuses[i]
             m = metas[i]
             imgs = [x.strip() for x in (m.get("images","") or "").split(",") if x.strip()]
-            page_id = m.get("page_id")
+            page_id = m.get("page_id")  # <-- NEW: pick page_id from metadata
             packed.append(
                 (
                     cid,                 # 0
@@ -199,9 +170,8 @@ def hybrid_search(
                     imgs,                # 4
                     m.get("model_id",""),# 5
                     m.get("url",""),     # 6
-                    "car_spec",          # 7
-                    page_id,             # 8
-                    m.get("car_model","")# 9
+                    "car_spec",          # 7 source_name
+                    page_id,             # 8 <-- NEW: page_id
                 )
             )
 
@@ -211,11 +181,8 @@ def hybrid_search(
     return results
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# (Optional) Generator you keep — unchanged
-# ──────────────────────────────────────────────────────────────────────────────
-
 def gen_answer_prompt(user_query: str, docs: list):
+    """Assemble the full prompt for the LLM."""
     doc_block = "\n\n".join(
         f"**Chunk ID**: {cid}\n"
         f"**Title**: {title}\n"
@@ -223,8 +190,9 @@ def gen_answer_prompt(user_query: str, docs: list):
         f"**Source**: {source_name} ({model_id})\n"
         f"**URL**: {url}\n"
         f"**Images**: {', '.join(imgs) if imgs else 'بدون تصویر'}"
-        for cid, title, content, _, imgs, model_id, url, source_name, *_ in docs
+        for cid, title, content, _, imgs, model_id, url, source_name in docs
     )
+
     return f"""
 You are an automotive assistant. Respond strictly based on the information provided.
 
@@ -235,10 +203,11 @@ You are an automotive assistant. Respond strictly based on the information provi
 {doc_block}
 
 **Instructions**
+
 * Provide responses strictly based on the chunks provided; do not include external knowledge.
 * If the user requests a comparison between two models, present a concise comparison using either a brief paragraph or a simple table.
 * Write in clear Farsi, maintaining original technical terms (e.g., hp, Nm).
-* If the requested information is **not found** in the chunks provided, explicitly state that you don't have the information.
+* If the requested information is **not found** in the chunks provided, explicitly state that you don't have the information, and do **not** include any sources.
 * Be concise without extra commentary or process explanations.
 * Provide your response strictly in JSON format:
 
@@ -247,12 +216,13 @@ You are an automotive assistant. Respond strictly based on the information provi
   "sources": ["source_url1", "source_url2", ...]
 }}
 
-If no relevant information is available:
+* Include the sources **only** if your response is based on provided chunks. If no relevant information is available, your JSON should strictly be:
 
 {{
   "response": "متأسفانه اطلاعات درخواستی در مستندات ارائه‌شده موجود نیست."
 }}
 """
+
 
 def generate_answer(user_query: str, docs: list):
     prompt = gen_answer_prompt(user_query, docs)
@@ -261,9 +231,20 @@ def generate_answer(user_query: str, docs: list):
     response = llm.invoke([sys_message])
     answer_raw = response.content
 
-    # Optional parser (not used by the agent path)
-    try:
-        parsed = json.loads(answer_raw)
-        return parsed.get("response", answer_raw), [], parsed.get("sources", [])
-    except Exception:
-        return answer_raw, [], []
+    # 3) Parse out the chunk_ids and images used from the final lines
+    chunk_ids_used = []
+    images_used = []
+
+    # --- Parse citations  ----------------------------------------------------
+    chunk_ids_used, urls_used = [], []
+    m_chunks = re.search(r"\[(.*?)\]", answer_raw, re.S)
+    m_urls = re.search(r"\{(.*?)\}", answer_raw, re.S)
+    if m_chunks:
+        chunk_ids_used = [c.strip() for c in m_chunks.group(1).split(',') if c.strip()]
+    if m_urls:
+        urls_used = [u.strip() for u in m_urls.group(1).split(',') if u.strip()]
+
+    # Strip citation lines from displayed answer
+    answer_clean = answer_raw.split("\n[")[0].rstrip()
+
+    return answer_clean, chunk_ids_used, urls_used
