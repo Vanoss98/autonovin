@@ -1,40 +1,35 @@
 # views.py
-from datetime import datetime
-from typing import List, Dict
-from urllib.parse import urlparse, urlunparse
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from .agent import run_turn
-import logging, traceback, json
-from django.conf import settings
+import json
+import logging
+import traceback
 from collections import defaultdict
-from crawler.infrastructure.models import PageImage
+from typing import Dict, List
+from urllib.parse import urlparse, urlunparse
+
+from django.conf import settings
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from .prompts import ANALYSIS_PROMPT
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
+from crawler.infrastructure.models import PageImage
+from .agent import run_turn
 
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
 BASE_MEDIA_ORIGIN = "https://llm.autonovin.ir"
 
 def _force_origin(u: str) -> str:
-    """
-    Force ANY URL (absolute or relative) to live under https://llm.autonovin.ir.
-    - If u is absolute (http/https), replace scheme+netloc with our origin, keep path/query/fragment.
-    - If u is relative, prefix with origin and ensure leading slash.
-    """
     if not u:
         return u
     try:
         p = urlparse(u)
-        # Absolute URL?
         if p.scheme in ("http", "https") and p.netloc:
-            # Keep path/query/fragment, swap scheme+netloc
             origin = urlparse(BASE_MEDIA_ORIGIN)
             new_parts = (
                 origin.scheme or "https",
@@ -45,78 +40,13 @@ def _force_origin(u: str) -> str:
                 p.fragment,
             )
             return urlunparse(new_parts)
-        # Relative URL -> slap origin in front
         path = u if u.startswith("/") else f"/{u}"
         origin = urlparse(BASE_MEDIA_ORIGIN)
         new_parts = (origin.scheme or "https", origin.netloc, path, "", "", "")
         return urlunparse(new_parts)
     except Exception:
-        # Fallback: best-effort join
-        cleaned = u.lstrip("/")
+        cleaned = (u or "").lstrip("/")
         return f"{BASE_MEDIA_ORIGIN}/{cleaned}"
-
-def _flatten_images(images_by_page: dict[int, list[str]]) -> list[str]:
-    out = []
-    for urls in images_by_page.values():
-        for u in urls:
-            if u:
-                out.append(u)
-    # de-dupe, preserve order
-    return list(dict.fromkeys(out))
-
-def _parse_tool_payload(raw: str) -> tuple[list[int], list[str]]:
-    """
-    Parse a tool's JSON string and return (page_ids, urls).
-    Accepts both {"page_ids":[...], "urls":[...]} and legacy {"docs":{...}}.
-    """
-    page_ids, urls = [], []
-    try:
-        payload = json.loads(raw or "{}")
-        if not isinstance(payload, dict):
-            return [], []
-        # urls
-        if isinstance(payload.get("urls"), list):
-            urls = [u for u in payload["urls"] if isinstance(u, str)]
-        # page_ids
-        if isinstance(payload.get("page_ids"), list):
-            page_ids = [pid for pid in payload["page_ids"] if isinstance(pid, int)]
-        elif "docs" in payload and isinstance(payload["docs"], dict):
-            inferred = []
-            for _, lst in payload["docs"].items():
-                for tup in (lst or []):
-                    if isinstance(tup, (list, tuple)) and len(tup) >= 9 and tup[8] is not None:
-                        inferred.append(tup[8])
-            page_ids = [pid for pid in dict.fromkeys(inferred)]
-    except Exception:
-        pass
-    return page_ids, urls
-
-def _nearest_tool_before_bounded(full_linear: list[dict], *, assistant_idx: int) -> tuple[list[int], list[str]]:
-    """
-    Walk backward from assistant_idx-1; stop at previous assistant.
-    Returns (page_ids, urls) from that tool, or ([], []).
-    'full_linear' is a list of dicts with keys: role, content_raw.
-    """
-    j = assistant_idx - 1
-    while j >= 0:
-        role = full_linear[j].get("role")
-        if role == "assistant":
-            return [], []
-        if role == "tool":
-            return _parse_tool_payload(full_linear[j].get("content_raw"))
-        j -= 1
-    return [], []
-
-def _build_page_images_map(all_page_ids: list[int], request) -> dict[int, list[str]]:
-    if not all_page_ids:
-        return {}
-    qs = PageImage.objects.filter(page_id__in=all_page_ids).select_related("page")
-    grouped = defaultdict(list)
-    for img in qs:
-        if img.file:
-            grouped[img.page_id].append(request.build_absolute_uri(img.file.url))
-    # keep insertion order per page
-    return {pid: urls for pid, urls in grouped.items()}
 
 def _role_of_langchain_msg(msg) -> str:
     t = getattr(msg, "type", "").lower()
@@ -127,7 +57,6 @@ def _role_of_langchain_msg(msg) -> str:
     return t or msg.__class__.__name__.replace("Message", "").lower()
 
 def _content_to_raw_str(raw) -> str:
-    # LangChain message content can be str or list of typed parts
     if isinstance(raw, str):
         return raw
     try:
@@ -136,10 +65,6 @@ def _content_to_raw_str(raw) -> str:
         return str(raw)
 
 def _annotate_turn_ids_inplace(history_ua: list[dict]) -> None:
-    """
-    In-place: add turn_id to each user/assistant message.
-    Pairs in order: (user -> assistant) => 1..N
-    """
     turn_id = 0
     pending_user = None
     for m in history_ua:
@@ -153,24 +78,129 @@ def _annotate_turn_ids_inplace(history_ua: list[dict]) -> None:
             m["turn_id"] = turn_id
             pending_user = None
 
-def _build_turn_pairs(history_ua: list[dict]) -> list[dict]:
-    """
-    Build convenient [{id, user, assistant, images, sources}] list.
-    Requires messages to already have turn_id and assistant messages to carry images/sources.
-    """
-    pairs = []
-    cur = {}
-    for m in history_ua:
-        if m["role"] == "user":
-            cur = {"id": m.get("turn_id"), "user": m.get("content", "")}
-        elif m["role"] == "assistant":
-            cur = {"id": m.get("turn_id"), **cur}
-            cur["assistant"] = m.get("content", "")
-            cur["images"] = m.get("images", []) or []
-            cur["sources"] = m.get("sources", []) or []
-            pairs.append(cur)
-            cur = {}
-    return pairs
+def _build_page_images_map(all_page_ids: list[int], request) -> dict[int, list[str]]:
+    if not all_page_ids:
+        return {}
+    qs = PageImage.objects.filter(page_id__in=all_page_ids).select_related("page")
+    grouped = defaultdict(list)
+    for img in qs:
+        if img.file:
+            grouped[img.page_id].append(request.build_absolute_uri(img.file.url))
+    return {pid: urls for pid, urls in grouped.items()}
+
+# ── NEW: normalization used to match user text to model keys ────────────────
+import re as _re
+def _norm_text(s: str) -> str:
+    if not s:
+        return ""
+    s = s.strip().lower()
+    s = s.replace("ي","ی").replace("ك","ک")
+    s = _re.sub(r"[\u0640\u200c\u200f\u2060]", "", s)
+    s = _re.sub(r"\s+", " ", s)
+    en2fa = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+    fa2en = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+    # return a combined variant that contains both digit systems for naive containment
+    a = s.translate(fa2en)
+    b = s.translate(en2fa)
+    # prefer ascii-digit variant for substring checks
+    return a + " | " + b
+
+# ── NEW: parse full tool payload (we need docs grouped by model) ────────────
+def _parse_tool_full(raw: str) -> dict:
+    try:
+        payload = json.loads(raw or "{}")
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+# ── NEW: find nearest tool and nearest user before a given assistant idx ────
+def _nearest_tool_before_bounded(full_linear: list[dict], *, assistant_idx: int) -> str:
+    j = assistant_idx - 1
+    while j >= 0:
+        role = full_linear[j].get("role")
+        if role == "assistant":
+            return ""  # bounded at previous assistant
+        if role == "tool":
+            return full_linear[j].get("content_raw", "")
+        j -= 1
+    return ""
+
+def _nearest_user_before(full_linear: list[dict], *, assistant_idx: int) -> str:
+    j = assistant_idx - 1
+    while j >= 0:
+        if full_linear[j].get("role") == "user":
+            return full_linear[j].get("content_raw", "")
+        j -= 1
+    return ""
+
+# ── NEW: choose primary model from tool docs + user/assistant texts ─────────
+def _pick_primary_model_from_tool(payload: dict, user_text: str, assistant_text: str) -> str | None:
+    docs = payload.get("docs")
+    if not isinstance(docs, dict) or not docs:
+        return None
+    user_n = _norm_text(user_text)
+    asst_n = _norm_text(assistant_text)
+    models = list(docs.keys())
+    if not models:
+        return None
+
+    # 1) direct containment: if model key appears in user or assistant text
+    candidates = []
+    for m in models:
+        m_n_a = _norm_text(m)
+        score = 0
+        if m_n_a and m_n_a.split(" | ")[0] in user_n: score += 3
+        if m_n_a and m_n_a.split(" | ")[1] in user_n: score += 3
+        if m_n_a and m_n_a.split(" | ")[0] in asst_n: score += 2
+        if m_n_a and m_n_a.split(" | ")[1] in asst_n: score += 2
+        if score > 0:
+            candidates.append((score, m))
+
+    if candidates:
+        candidates.sort(reverse=True)  # highest score first
+        return candidates[0][1]
+
+    # 2) fallback: the model with the largest number of tuples
+    return max(models, key=lambda m: len(docs.get(m) or []), default=None)
+
+# ── NEW: build urls/page_ids for ONLY one selected model; allow intersect with assistant urls ──
+def _urls_and_pids_for_model(payload: dict, model: str, prefer_urls: List[str] | None = None) -> tuple[List[str], List[int]]:
+    docs = payload.get("docs") or {}
+    lst = docs.get(model) or []
+    # extract ordered urls/pids from tuples: url at 6, page_id at 8
+    urls = []
+    pids = []
+    seen_u, seen_p = set(), set()
+    for t in lst:
+        if isinstance(t, (list, tuple)):
+            u = t[6] if len(t) >= 7 else None
+            pid = t[8] if len(t) >= 9 else None
+            if isinstance(u, str) and u and u not in seen_u:
+                seen_u.add(u); urls.append(u)
+            if isinstance(pid, int) and pid not in seen_p:
+                seen_p.add(pid); pids.append(pid)
+
+    if prefer_urls:
+        # Intersection while preserving assistant order first, then keep remaining model URLs
+        ordered_pref = [u for u in prefer_urls if u in seen_u]
+        remaining = [u for u in urls if u not in ordered_pref]
+        final_urls = ordered_pref + remaining
+        # derive pids from final_urls order
+        url_to_pid = {}
+        for t in lst:
+            if isinstance(t, (list, tuple)) and len(t) >= 9:
+                uu, pp = t[6], t[8]
+                if isinstance(uu, str) and isinstance(pp, int) and uu not in url_to_pid:
+                    url_to_pid[uu] = pp
+        final_pids = []
+        seenp = set()
+        for u in final_urls:
+            pid = url_to_pid.get(u)
+            if isinstance(pid, int) and pid not in seenp:
+                seenp.add(pid); final_pids.append(pid)
+        return final_urls, final_pids
+
+    return urls, pids
 
 @method_decorator(csrf_exempt, name="dispatch")
 class ChatAPIView(APIView):
@@ -182,11 +212,8 @@ class ChatAPIView(APIView):
 
         thread_id_in = request.data.get("thread_id")
         try:
-            # Run the turn (gives final answer + urls for THIS assistant turn)
             answer, urls_current, thread_id_out, _ = run_turn(user_text, thread_id=thread_id_in)
-
-            # After the turn, read RAW messages from the LangGraph memory
-            from .agent import get_thread_messages  # local import to avoid cycles
+            from .agent import get_thread_messages
             msgs = get_thread_messages(thread_id_out) or []
         except Exception as exc:
             logger.exception("Chatbot crashed")
@@ -196,45 +223,60 @@ class ChatAPIView(APIView):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             return Response({"error": "Internal Server Error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # 1) Linearize raw messages (keep tool/system in this pass)
+        # 1) Linearize messages; skip empty assistant stubs
         linear = []
         for m in msgs:
             role = _role_of_langchain_msg(m)
-            linear.append({"role": role, "content_raw": _content_to_raw_str(m.content)})
+            raw = _content_to_raw_str(m.content)
+            if role == "assistant" and not (raw or "").strip():
+                continue
+            linear.append({"role": role, "content_raw": raw})
 
-        # 2) For every assistant message, bind to its own tool (bounded) and collect page_ids/urls
+        # 2) Build history with model-aware selection for images/sources
         assistant_indices = [i for i, _ in enumerate(linear) if linear[i]["role"] == "assistant"]
         per_assistant_page_ids: Dict[int, List[int]] = {}
         per_assistant_sources: Dict[int, List[str]] = {}
         all_page_ids: List[int] = []
 
         for ai in assistant_indices:
-            # Parse assistant JSON for display text + assistant-declared urls
+            # assistant JSON (if any)
             content_disp = linear[ai]["content_raw"]
             urls_from_assistant: List[str] = []
             try:
-                payload = json.loads(content_disp)
-                if isinstance(payload, dict) and "response" in payload:
-                    content_disp = payload.get("response", content_disp)
-                    urls_from_assistant = payload.get("urls", []) or []
+                payload_asst = json.loads(content_disp)
+                if isinstance(payload_asst, dict) and "response" in payload_asst:
+                    content_disp = payload_asst.get("response", content_disp)
+                    urls_from_assistant = payload_asst.get("urls", []) or []
             except Exception:
                 pass
-            # Save back the display text
             linear[ai]["content_disp"] = content_disp
 
-            # Find THIS turn's tool (bounded by previous assistant)
-            pids, urls_from_tool = _nearest_tool_before_bounded(linear, assistant_idx=ai)
-            per_assistant_page_ids[ai] = pids
-            all_page_ids.extend(pids)
+            # bounded tool payload (needed to map model->(urls,pids))
+            tool_raw = _nearest_tool_before_bounded(linear, assistant_idx=ai)
+            tool_payload = _parse_tool_full(tool_raw)
 
-            # Prefer assistant-declared urls, else fallback to tool urls
-            per_assistant_sources[ai] = urls_from_assistant if urls_from_assistant else urls_from_tool
+            # nearest user text for this turn (to help pick the model)
+            user_q = _nearest_user_before(linear, assistant_idx=ai)
 
-        # 3) Batch-fetch all images for all assistant turns
+            # choose primary model from tool docs + user/assistant text
+            primary = _pick_primary_model_from_tool(tool_payload, user_q, content_disp)
+
+            # build urls/pids for that model; bias to assistant urls if provided
+            if primary:
+                urls_sel, pids_sel = _urls_and_pids_for_model(tool_payload, primary, prefer_urls=urls_from_assistant)
+            else:
+                # fallback: nothing model-aware available — keep empty (no wrong images)
+                urls_sel, pids_sel = [], []
+
+            per_assistant_sources[ai] = urls_sel
+            per_assistant_page_ids[ai] = pids_sel
+            all_page_ids.extend(pids_sel)
+
+        # 3) Fetch images for selected page_ids only
         all_page_ids = list(dict.fromkeys(all_page_ids))
         page_images_map = _build_page_images_map(all_page_ids, request)
 
-        # 4) Build user/assistant-only history with images/sources attached to each assistant
+        # 4) Build UA history
         history_ua = []
         for i, rec in enumerate(linear):
             role = rec["role"]
@@ -243,15 +285,11 @@ class ChatAPIView(APIView):
             if role == "user":
                 history_ua.append({"role": "user", "content": rec["content_raw"]})
             elif role == "assistant":
-                # Flatten images for this assistant, ordered by page_ids
                 pids = per_assistant_page_ids.get(i, []) or []
                 imgs: List[str] = []
                 for pid in pids:
                     imgs.extend(page_images_map.get(pid, []))
-
-                # Force-rehost everything to llm.autonovin.ir and de-dupe
                 imgs = list(dict.fromkeys(_force_origin(x) for x in imgs))
-
                 history_ua.append({
                     "role": "assistant",
                     "content": rec.get("content_disp", rec["content_raw"]),
@@ -259,20 +297,7 @@ class ChatAPIView(APIView):
                     "sources": per_assistant_sources.get(i, []) or [],
                 })
 
-        # 5) Annotate turn ids and (optionally) build pairs
         _annotate_turn_ids_inplace(history_ua)
-        turns = _build_turn_pairs(history_ua)  # kept if you need it later
-
-        # 6) (Optional) current images by page — also force origin for consistency
-        current_ai = assistant_indices[-1] if assistant_indices else None
-        current_images_by_page = {}
-        if current_ai is not None:
-            current_pids = per_assistant_page_ids.get(current_ai, []) or []
-            for pid in current_pids:
-                raw_imgs = page_images_map.get(pid, []) or []
-                abs_imgs = list(dict.fromkeys(_force_origin(x) for x in raw_imgs))
-                if abs_imgs:
-                    current_images_by_page[pid] = abs_imgs
 
         return Response({
             "thread_id": thread_id_out,
@@ -288,49 +313,54 @@ class ChatAPIView(APIView):
 @method_decorator(csrf_exempt, name="dispatch")
 class ChatHistoryAPIView(APIView):
     def get(self, request, thread_id: str):
-        from .agent import get_thread_messages  # local import to avoid cycles
+        from .agent import get_thread_messages
         msgs = get_thread_messages(thread_id) or []
         if not msgs:
             return Response({"thread_id": thread_id, "history": []}, status=status.HTTP_200_OK)
 
-        # 1) Linearize raw messages (keep tool/system for bounded lookup)
         linear = []
         for m in msgs:
             role = _role_of_langchain_msg(m)
-            linear.append({"role": role, "content_raw": _content_to_raw_str(m.content)})
+            raw = _content_to_raw_str(m.content)
+            if role == "assistant" and not (raw or "").strip():
+                continue
+            linear.append({"role": role, "content_raw": raw})
 
-        # 2) Collect per-assistant page_ids & sources
         assistant_indices = [i for i, _ in enumerate(linear) if linear[i]["role"] == "assistant"]
         per_assistant_page_ids: Dict[int, List[int]] = {}
         per_assistant_sources: Dict[int, List[str]] = {}
         all_page_ids: List[int] = []
 
         for ai in assistant_indices:
-            # From assistant JSON
             content_disp = linear[ai]["content_raw"]
             urls_from_assistant: List[str] = []
             try:
-                payload = json.loads(content_disp)
-                if isinstance(payload, dict) and "response" in payload:
-                    content_disp = payload.get("response", content_disp)
-                    urls_from_assistant = payload.get("urls", []) or []
+                payload_asst = json.loads(content_disp)
+                if isinstance(payload_asst, dict) and "response" in payload_asst:
+                    content_disp = payload_asst.get("response", content_disp)
+                    urls_from_assistant = payload_asst.get("urls", []) or []
             except Exception:
                 pass
             linear[ai]["content_disp"] = content_disp
 
-            # From bounded tool
-            pids, urls_from_tool = _nearest_tool_before_bounded(linear, assistant_idx=ai)
-            per_assistant_page_ids[ai] = pids
-            all_page_ids.extend(pids)
+            tool_raw = _nearest_tool_before_bounded(linear, assistant_idx=ai)
+            tool_payload = _parse_tool_full(tool_raw)
 
-            # Prefer assistant urls; else tool urls
-            per_assistant_sources[ai] = urls_from_assistant if urls_from_assistant else urls_from_tool
+            user_q = _nearest_user_before(linear, assistant_idx=ai)
+            primary = _pick_primary_model_from_tool(tool_payload, user_q, content_disp)
 
-        # 3) Batch images
+            if primary:
+                urls_sel, pids_sel = _urls_and_pids_for_model(tool_payload, primary, prefer_urls=urls_from_assistant)
+            else:
+                urls_sel, pids_sel = [], []
+
+            per_assistant_sources[ai] = urls_sel
+            per_assistant_page_ids[ai] = pids_sel
+            all_page_ids.extend(pids_sel)
+
         all_page_ids = list(dict.fromkeys(all_page_ids))
         page_images_map = _build_page_images_map(all_page_ids, request)
 
-        # 4) Build user/assistant-only history with images/sources per assistant
         history_ua = []
         for i, rec in enumerate(linear):
             role = rec["role"]
@@ -343,10 +373,7 @@ class ChatHistoryAPIView(APIView):
                 imgs: List[str] = []
                 for pid in pids:
                     imgs.extend(page_images_map.get(pid, []))
-
-                # Force-rehost everything to llm.autonovin.ir and de-dupe
                 imgs = list(dict.fromkeys(_force_origin(x) for x in imgs))
-
                 history_ua.append({
                     "role": "assistant",
                     "content": rec.get("content_disp", rec["content_raw"]),
@@ -354,10 +381,7 @@ class ChatHistoryAPIView(APIView):
                     "sources": per_assistant_sources.get(i, []) or [],
                 })
 
-        # 5) Turn ids + pairs (pairs kept for parity)
         _annotate_turn_ids_inplace(history_ua)
-        turns = _build_turn_pairs(history_ua)
-
         return Response({
             "thread_id": thread_id,
             "history": history_ua,
